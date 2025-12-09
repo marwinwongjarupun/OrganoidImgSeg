@@ -1,0 +1,35 @@
+remote connection
+ulitraVNC viewer
+zerotier 
+  network iD 45b6e887e2a9ad10
+wait for authorization
+
+ip address 
+
+
+
+cellpose https://github.com/MouseLand/cellpose
+1. install python https://www.python.org/downloads/
+2. open cmd.exe or terminal
+3. input commands:
+python -m pip install cellpose --upgrade 
+python -m pip install cellpose[gui]
+
+4. run cellpose
+in cmd.exe or terminal input:
+(on the workstation) conda activate org
+cellpose
+
+Manual : https://cellpose.readthedocs.io/en/latest/index.html
+
+run CPSAM
+save masks and images in cellpose
+label image
+train
+
+python -m cellpose --train --dir C:\Users\User\Desktop\trainset --test_dir C:\Users\User\Desktop\testset --learning_rate 0.00001 --weight_decay 0.1 --n_epochs 100 --train_batch_size 1 --mask_filter _neg.npy
+
+vscode
+
+replace folder directories of train and test dir
+80% image data for training 10 for testing
