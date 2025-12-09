@@ -27,7 +27,9 @@ save masks and images in cellpose
 label image
 train
 
-python -m cellpose --train --dir C:\Users\User\Desktop\trainset --test_dir C:\Users\User\Desktop\testset --learning_rate 0.00001 --weight_decay 0.1 --n_epochs 100 --train_batch_size 1 --mask_filter _neg.npy
+python -m cellpose --train --dir C:\Users\User\Desktop\trainset --test_dir C:\Users\User\Desktop\testset --learning_rate 0.00001 --weight_decay 0.1 --n_epochs 100 --train_batch_size 1 --mask_filter _seg.npy --use_gpu --verbose
+
+ex: python -m cellpose --train --dir "C:\Users\Marwin\Desktop\organoids\251204\training-day-4" --test_dir "C:\Users\Marwin\Desktop\organoids\251204\testing-day-4" --learning_rate 0.00001 --weight_decay 0.1 --n_epochs 100 --train_batch_size 1 --mask_filter _seg.npy --use_gpu
 
 vscode
 
