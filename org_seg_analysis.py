@@ -7,16 +7,17 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import Normalize
 from matplotlib.cm import ScalarMappable, viridis
 import seaborn as sns
+import re
 import os
 import glob
 
 # ================= CONFIGURATION =================
 # 1. PATHS FOR THE TWO DATASETS
 # Please enter the path to your "Droplet" images
-DROPLET_FOLDER = r"C:\Users\Marwin\Desktop\organoids\251204\training-day-4" 
+DROPLET_FOLDER = r"C:\Users\Marwin\Desktop\organoids\251204\training-day-5" 
 
 # Please enter the path to your "Bulk" images
-BULK_FOLDER = r"C:\Users\Marwin\Desktop\organoids\251204\testing-day-4" 
+BULK_FOLDER = r"C:\Users\Marwin\Desktop\organoids\251204\training-day-5-bulk" 
 
 # 2. OUTPUT LOCATION
 # Where should the comparison folder be created? (Defaults to the parent of the droplet folder)
@@ -252,7 +253,7 @@ def plot_comparison(droplet_df, bulk_df, output_dir):
     combined_df.to_csv(os.path.join(output_dir, "combined_comparison_data.csv"), index=False)
 
     # Plot Setup
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    fig, axes = plt.subplots(1, 3, figsize=(20, 6))
     
     # 1. Average Axis Comparison
     sns.boxplot(data=combined_df, x="Condition", y="average_axis", ax=axes[0], palette="Set2")
@@ -265,6 +266,13 @@ def plot_comparison(droplet_df, bulk_df, output_dir):
     sns.boxplot(data=combined_df, x="Condition", y="area", ax=axes[1], palette="Set2")
     axes[1].set_title(f"Organoid Area ({UNIT_NAME}²)")
     axes[1].set_ylabel(f"Area ({UNIT_NAME}²)")
+    
+    # 3. Circularity Comparison
+    sns.boxplot(data=combined_df, x="Condition", y="circularity", ax=axes[2], palette="Set2")
+    axes[2].set_title("Circularity (0-1)")
+    axes[2].set_ylabel("Circularity Index")
+    # Optional: Set limits since circularity is always between 0 and 1
+    axes[2].set_ylim(0, 1.05) 
 
     plt.suptitle("Droplet vs. Bulk Comparison", fontsize=16)
     plt.tight_layout()
@@ -291,5 +299,24 @@ if __name__ == "__main__":
     )
 
     # 3. Compare
-    comparison_dir = os.path.join(BASE_OUTPUT_DIR, "comparison_analysis")
+    full_folder_name = os.path.basename(os.path.normpath(DROPLET_FOLDER))
+    
+    # Search for the pattern: "day-" followed by numbers
+    match = re.search(r"day-\d+", full_folder_name)
+    
+    if match:
+        # If found, grab just that part (e.g., "day-5")
+        day_suffix = match.group()
+    else:
+        # Fallback: if "day-X" isn't found, use the whole name to be safe
+        print("Warning: Could not find 'day-X' pattern. Using full folder name.")
+        day_suffix = full_folder_name
+
+    # Construct the final folder name
+    # Result example: "comparison_analysis_day-5"
+    comparison_folder_name = f"comparison_analysis_{day_suffix}"
+    
+    comparison_dir = os.path.join(BASE_OUTPUT_DIR, comparison_folder_name)
+    # ---------------------------------------------------------
+
     plot_comparison(droplet_df, bulk_df, comparison_dir)
