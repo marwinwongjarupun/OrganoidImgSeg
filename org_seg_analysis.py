@@ -10,16 +10,16 @@ import seaborn as sns
 import re
 import os
 import glob
-import tifffile  # Added for TIFF fixing
-from pathlib import Path # Added for path handling
+import tifffile
+from pathlib import Path
 
 # ================= CONFIGURATION =================
 # 1. PATHS FOR THE TWO DATASETS
 # Please enter the path to your "Droplet" images
-DROPLET_FOLDER = r"C:\Users\Marwin\Desktop\organoids\251204\training-day-6" 
+DROPLET_FOLDER = r"C:\Users\Marwin\Desktop\organoids\251204\training-day-5" 
 
 # Please enter the path to your "Bulk" images
-BULK_FOLDER = r"C:\Users\Marwin\Desktop\organoids\251204\training-day-6-bulk" 
+BULK_FOLDER = r"C:\Users\Marwin\Desktop\organoids\251204\training-day-5-bulk" 
 
 # 2. OUTPUT LOCATION
 # Where should the comparison folder be created? (Defaults to the parent of the droplet folder)
@@ -45,7 +45,6 @@ def fix_tiff_files(directory):
         print(f"  Warning: Directory not found: {directory}")
         return
 
-    # Find all .tif or .tiff files
     files = list(Path(directory).glob("*.tif")) + list(Path(directory).glob("*.tiff"))
     
     if not files:
@@ -54,20 +53,16 @@ def fix_tiff_files(directory):
 
     count = 0
     for file_path in files:
-        # Skip hidden files or temporary files if necessary
         if file_path.name.startswith("._"):
             continue
 
         try:
-            # Read the image; tifffile is robust to bad metadata
             img = tifffile.imread(str(file_path))
             
             if img is None:
                 print(f"  Failed to read: {file_path.name}")
                 continue
 
-            # Overwrite the file with a clean standard TIFF
-            # This strips problematic ImageJ tags that might crash skimage/PIL
             tifffile.imwrite(
                 str(file_path), 
                 img, 
@@ -81,7 +76,6 @@ def fix_tiff_files(directory):
     print(f"  [Pre-Check] Successfully sanitized {count} files.")
 
 def plot_mask_overlay(save_dir, img, masks, filename_prefix, alpha=1.):
-    """Overlay labeled mask on original image."""
     mask_overlay = label2rgb(
         masks, image=img, bg_label=0, bg_color=None, alpha=alpha, kind="overlay"
     )
@@ -94,7 +88,6 @@ def plot_mask_overlay(save_dir, img, masks, filename_prefix, alpha=1.):
     plt.close()
 
 def calculate_organoid_metrics(masks, filename, scale):
-    """Calculate organoid metrics converting pixels to real units."""
     props = measure.regionprops(masks)
     
     metrics = {
@@ -116,7 +109,6 @@ def calculate_organoid_metrics(masks, filename, scale):
         metrics["source_image"].append(filename)
         metrics["label"].append(prop.label)
         
-        # Unit Conversion
         real_area = prop.area * (scale ** 2)
         metrics["area"].append(real_area)
 
@@ -141,7 +133,6 @@ def calculate_organoid_metrics(masks, filename, scale):
     return pd.DataFrame(metrics)
 
 def plot_metric_statistics(save_dir, metrics_df, title_suffix):
-    """Plot distribution statistics for a single batch."""
     fig, axes = plt.subplots(2, 3, figsize=(18, 10))
     
     sns.histplot(metrics_df["area"], bins=30, kde=True, ax=axes[0, 0], color="skyblue")
@@ -170,7 +161,6 @@ def plot_metric_statistics(save_dir, metrics_df, title_suffix):
     plt.close(fig)
 
 def plot_metric_heatmap_on_image(save_dir, img, masks, metrics_df, metric, filename_prefix, alpha=0.6):
-    """Overlay a metric heatmap on the original image."""
     norm = Normalize(vmin=metrics_df[metric].min(), vmax=metrics_df[metric].max())
     cmap = viridis
     
@@ -211,12 +201,8 @@ def plot_metric_heatmap_on_image(save_dir, img, masks, metrics_df, metric, filen
     plt.close(fig)
 
 def process_batch(input_folder, output_folder_name, condition_label):
-    """
-    Process a folder of images, generate individual plots, and return consolidated DF.
-    """
     print(f"\n--- Starting processing for: {condition_label} ---")
     
-    # Create specific output directory
     save_dir = os.path.join(input_folder, output_folder_name)
     individual_dir = os.path.join(save_dir, "individual_images")
     os.makedirs(save_dir, exist_ok=True)
@@ -231,9 +217,7 @@ def process_batch(input_folder, output_folder_name, condition_label):
     for img_path in image_files:
         base_name = os.path.basename(img_path).replace(IMG_EXTENSION, "")
         
-        # IGNORE FLOW FILES
         if base_name.endswith("flows"):
-            print(f"Skipping flow file: {base_name}")
             continue
 
         mask_path = os.path.join(input_folder, base_name + MASK_SUFFIX)
@@ -244,7 +228,6 @@ def process_batch(input_folder, output_folder_name, condition_label):
 
         print(f"Processing: {base_name}...")
         try:
-            # Note: Since we fixed the files, skimage.io.imread should work fine now
             img = skimage.io.imread(img_path)
             seg_data = np.load(mask_path, allow_pickle=True).item()
             masks = seg_data["masks"] 
@@ -252,15 +235,11 @@ def process_batch(input_folder, output_folder_name, condition_label):
             print(f"Error loading {base_name}: {e}")
             continue
 
-        # 1. Overlay
         plot_mask_overlay(individual_dir, img, masks, filename_prefix=base_name)
-
-        # 2. Metrics
         current_df = calculate_organoid_metrics(masks, base_name, MICRONS_PER_PIXEL)
-        current_df["Condition"] = condition_label # Tag data with "Droplet" or "Bulk"
+        current_df["Condition"] = condition_label
         batch_metrics_list.append(current_df)
 
-        # 3. Heatmaps
         metrics_to_plot = ['area', 'average_axis'] 
         for metric in metrics_to_plot:
             plot_metric_heatmap_on_image(
@@ -269,14 +248,9 @@ def process_batch(input_folder, output_folder_name, condition_label):
             )
 
     if batch_metrics_list:
-        # Consolidate
         master_df = pd.concat(batch_metrics_list, ignore_index=True)
-        
-        # Save CSV
         csv_path = os.path.join(save_dir, f"{condition_label}_metrics.csv")
         master_df.to_csv(csv_path, index=False)
-        
-        # Plot Global Stats for this batch
         plot_metric_statistics(save_dir, master_df, title_suffix=condition_label)
         print(f"Finished {condition_label}. Saved to {save_dir}")
         return master_df
@@ -287,35 +261,56 @@ def process_batch(input_folder, output_folder_name, condition_label):
 def plot_comparison(droplet_df, bulk_df, output_dir):
     """
     Generate comparison plots between Droplet and Bulk.
+    Updated to resolve Seaborn FutureWarning.
     """
     print("\n--- Generating Comparison Graphs ---")
     os.makedirs(output_dir, exist_ok=True)
     
-    # Combine dataframes
     if droplet_df.empty or bulk_df.empty:
         print("Cannot compare: One or both datasets are empty.")
         return
 
     combined_df = pd.concat([droplet_df, bulk_df], ignore_index=True)
-    
-    # Save combined CSV
     combined_df.to_csv(os.path.join(output_dir, "combined_comparison_data.csv"), index=False)
 
-    # Plot Setup
     fig, axes = plt.subplots(1, 3, figsize=(20, 6))
     
     # 1. Average Axis Comparison
-    sns.boxplot(data=combined_df, x="Condition", y="average_axis", ax=axes[0], palette="Set2")
+    sns.boxplot(
+        data=combined_df, 
+        x="Condition", 
+        y="average_axis", 
+        hue="Condition", # Added hue
+        legend=False,    # Disabled legend
+        ax=axes[0], 
+        palette="Set2"
+    )
     axes[0].set_title(f"Average Axis Length ({UNIT_NAME})")
     axes[0].set_ylabel(f"Length ({UNIT_NAME})")
 
     # 2. Area Comparison
-    sns.boxplot(data=combined_df, x="Condition", y="area", ax=axes[1], palette="Set2")
+    sns.boxplot(
+        data=combined_df, 
+        x="Condition", 
+        y="area", 
+        hue="Condition", # Added hue
+        legend=False,    # Disabled legend
+        ax=axes[1], 
+        palette="Set2"
+    )
     axes[1].set_title(f"Organoid Area ({UNIT_NAME}²)")
     axes[1].set_ylabel(f"Area ({UNIT_NAME}²)")
     
     # 3. Circularity Comparison
-    sns.boxplot(data=combined_df, x="Condition", y="circularity", ax=axes[2], palette="Set2")
+    sns.boxplot(
+        data=combined_df, 
+        x="Condition", 
+        y="circularity", 
+        hue="Condition", # Added hue
+        legend=False,    # Disabled legend
+        ax=axes[2], 
+        palette="Set2"
+    )
     axes[2].set_title("Circularity (0-1)")
     axes[2].set_ylabel("Circularity Index")
     axes[2].set_ylim(0, 1.05) 
@@ -330,8 +325,6 @@ def plot_comparison(droplet_df, bulk_df, output_dir):
 
 if __name__ == "__main__":
     
-    # ================= PHASE 0: FIX TIFFS =================
-    # This runs BEFORE any processing to ensure images are readable.
     print("====================================================")
     print("STEP 0: Sanitize TIFF files (Fix Bad Metadata)")
     print("====================================================")
@@ -339,36 +332,29 @@ if __name__ == "__main__":
     fix_tiff_files(DROPLET_FOLDER)
     fix_tiff_files(BULK_FOLDER)
     
-    # ================= PHASE 1: PROCESSING =================
     print("\n====================================================")
     print("STEP 1: Analyze Images")
     print("====================================================")
 
-    # 1. Process Droplet Batch
     droplet_df = process_batch(
         input_folder=DROPLET_FOLDER, 
         output_folder_name="droplet_consolidated", 
         condition_label="Droplet"
     )
 
-    # 2. Process Bulk Batch
     bulk_df = process_batch(
         input_folder=BULK_FOLDER, 
         output_folder_name="bulk_consolidated", 
         condition_label="Bulk"
     )
 
-    # ================= PHASE 2: COMPARISON =================
     # 3. Compare
     full_folder_name = os.path.basename(os.path.normpath(DROPLET_FOLDER))
-    
-    # Search for the pattern: "day-" followed by numbers
     match = re.search(r"day-\d+", full_folder_name)
     
     if match:
         day_suffix = match.group()
     else:
-        print("Warning: Could not find 'day-X' pattern. Using full folder name.")
         day_suffix = full_folder_name
 
     comparison_folder_name = f"comparison_analysis_{day_suffix}"
