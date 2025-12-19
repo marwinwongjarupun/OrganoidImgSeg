@@ -11,7 +11,7 @@ import re
 PARENT_FOLDER = r"C:\Users\Marwin\Desktop\organoids\251204"
 
 # Where to save the final timeline graphs
-OUTPUT_DIR = os.path.join(PARENT_FOLDER, "Longitudinal_Analysis_Results")
+OUTPUT_DIR = os.path.join(PARENT_FOLDER, "longitudinal_analysis_results")
 
 # Metrics to analyze
 METRICS = {

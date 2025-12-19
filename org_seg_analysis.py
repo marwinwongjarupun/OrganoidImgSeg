@@ -15,38 +15,37 @@ from pathlib import Path
 
 # ================= CONFIGURATION =================
 # 1. PATHS FOR THE TWO DATASETS
-# Please enter the path to your "Droplet" images
-DROPLET_FOLDER = r"C:\Users\Marwin\Desktop\organoids\251204\training-day-5" 
-
-# Please enter the path to your "Bulk" images
-BULK_FOLDER = r"C:\Users\Marwin\Desktop\organoids\251204\training-day-5-bulk" 
+TRAINING_SET_1 = r"C:\Users\Marwin\Desktop\organoids\20251215\training-day-5-shaker"
+TRAINING_SET_2 = r"C:\Users\Marwin\Desktop\organoids\20251215\training-day-5-coated" 
 
 # 2. OUTPUT LOCATION
-# Where should the comparison folder be created? (Defaults to the parent of the droplet folder)
-BASE_OUTPUT_DIR = os.path.dirname(DROPLET_FOLDER)
+BASE_OUTPUT_DIR = os.path.dirname(TRAINING_SET_1)
 
 # 3. FILE SETTINGS
-IMG_EXTENSION = ".tif"
 MASK_SUFFIX = "_seg.npy" 
 
 # 4. SCALE SETTINGS
-MICRONS_PER_PIXEL = 0.85  # <--- CHANGE THIS to your actual scale
+MICRONS_PER_PIXEL = 0.85 
 UNIT_NAME = "µm"          
 # =================================================
 
+def get_condition_name_from_path(folder_path):
+    """Extracts label from folder name."""
+    folder_name = os.path.basename(os.path.normpath(folder_path))
+    if "-" in folder_name:
+        label = folder_name.split("-")[-1]
+    else:
+        label = folder_name
+    return label.capitalize()
+
 def fix_tiff_files(directory):
-    """
-    Scans a directory for TIFF files and rewrites them using tifffile
-    to fix potential metadata/header issues before processing.
-    """
+    """Scans and fixes TIFF metadata."""
     print(f"\n[Pre-Check] Scanning and fixing TIFFs in: {directory}")
-    
     if not os.path.exists(directory):
         print(f"  Warning: Directory not found: {directory}")
         return
 
     files = list(Path(directory).glob("*.tif")) + list(Path(directory).glob("*.tiff"))
-    
     if not files:
         print("  No TIFF files found to fix.")
         return
@@ -55,27 +54,45 @@ def fix_tiff_files(directory):
     for file_path in files:
         if file_path.name.startswith("._"):
             continue
-
         try:
             img = tifffile.imread(str(file_path))
+            if img is None: continue
             
-            if img is None:
-                print(f"  Failed to read: {file_path.name}")
-                continue
-
+            # Save nicely
             tifffile.imwrite(
                 str(file_path), 
                 img, 
                 photometric='rgb' if img.ndim==3 and img.shape[-1]==3 else None
             )
             count += 1
-            
-        except Exception as e:
-            print(f"  Error fixing {file_path.name}: {e}")
-    
+        except Exception:
+            pass
     print(f"  [Pre-Check] Successfully sanitized {count} files.")
 
+def normalize_image_for_plot(img):
+    """
+    Normalizes raw image data (e.g., 0-4095 12-bit) to 0.0-1.0 float range
+    to prevent matplotlib 'Clipping' warnings and slowness.
+    """
+    img = img.astype(float)
+    if img.size == 0:
+        return img
+    
+    val_min = img.min()
+    val_max = img.max()
+    
+    # If the image is not already 0-1 and has data
+    if val_max > 1.0:
+        if val_max > val_min:
+            img = (img - val_min) / (val_max - val_min)
+        else:
+            # If the image is a solid color (min == max), make it all zeros
+            img = np.zeros_like(img)
+            
+    return img
+
 def plot_mask_overlay(save_dir, img, masks, filename_prefix, alpha=1.):
+    # img is assumed to be already normalized by process_batch
     mask_overlay = label2rgb(
         masks, image=img, bg_label=0, bg_color=None, alpha=alpha, kind="overlay"
     )
@@ -89,22 +106,13 @@ def plot_mask_overlay(save_dir, img, masks, filename_prefix, alpha=1.):
 
 def calculate_organoid_metrics(masks, filename, scale):
     props = measure.regionprops(masks)
-    
     metrics = {
-        "source_image": [],
-        "label": [],
-        "area": [],           
-        "eccentricity": [],   
-        "circularity": [],    
-        "perimeter": [],      
-        "major_axis": [],     
-        "minor_axis": [],     
-        "average_axis": []    
+        "source_image": [], "label": [], "area": [], "eccentricity": [],   
+        "circularity": [], "perimeter": [], "major_axis": [], "minor_axis": [], "average_axis": []    
     }
 
     for prop in props:
-        if prop.area < 10: 
-            continue
+        if prop.area < 10: continue
 
         metrics["source_image"].append(filename)
         metrics["label"].append(prop.label)
@@ -122,12 +130,11 @@ def calculate_organoid_metrics(masks, filename, scale):
         metrics["average_axis"].append((real_major + real_minor) / 2)
 
         metrics["eccentricity"].append(prop.eccentricity)
-
-        circularity = (
-            (4 * np.pi * real_area) / (real_perimeter**2)
-            if real_perimeter > 0
-            else 0
-        )
+        
+        if real_perimeter > 0:
+            circularity = (4 * np.pi * real_area) / (real_perimeter**2)
+        else:
+            circularity = 0
         metrics["circularity"].append(min(circularity, 1.0))
 
     return pd.DataFrame(metrics)
@@ -151,8 +158,9 @@ def plot_metric_statistics(save_dir, metrics_df, title_suffix):
     axes[1, 1].set_title(f"Minor Axis ({UNIT_NAME})")
 
     sns.scatterplot(x="major_axis", y="minor_axis", data=metrics_df, ax=axes[1, 2], alpha=0.6)
-    max_val = max(metrics_df["major_axis"].max(), metrics_df["minor_axis"].max())
-    axes[1, 2].plot([0, max_val], [0, max_val], 'r--', alpha=0.5)
+    if not metrics_df.empty:
+        max_val = max(metrics_df["major_axis"].max(), metrics_df["minor_axis"].max())
+        axes[1, 2].plot([0, max_val], [0, max_val], 'r--', alpha=0.5)
     axes[1, 2].set_title("Major vs. Minor Axis")
 
     plt.suptitle(f"{title_suffix} Statistics", fontsize=16)
@@ -173,13 +181,11 @@ def plot_metric_heatmap_on_image(save_dir, img, masks, metrics_df, metric, filen
         overlay[mask, :3] = color[:3]
         overlay[mask, 3] = alpha 
 
+    # Image is already normalized in process_batch to 0-1
     if img.ndim == 2:
         background = np.stack([img] * 3, axis=-1)
     else:
         background = img.copy()
-    background = background.astype(float)
-    if background.max() > 1.0:
-        background /= 255.0
 
     combined = background.copy()
     alpha_mask = overlay[..., 3]
@@ -209,13 +215,18 @@ def process_batch(input_folder, output_folder_name, condition_label):
     os.makedirs(individual_dir, exist_ok=True)
 
     batch_metrics_list = []
-    image_files = glob.glob(os.path.join(input_folder, f"*{IMG_EXTENSION}"))
+    
+    # Updated: Look for both .tif and .tiff
+    image_files = glob.glob(os.path.join(input_folder, "*.tif")) + \
+                  glob.glob(os.path.join(input_folder, "*.tiff"))
     
     print(f"Directory: {input_folder}")
     print(f"Found {len(image_files)} files.")
 
     for img_path in image_files:
-        base_name = os.path.basename(img_path).replace(IMG_EXTENSION, "")
+        # Get extension dynamically to replace it correctly
+        _, ext = os.path.splitext(img_path)
+        base_name = os.path.basename(img_path).replace(ext, "")
         
         if base_name.endswith("flows"):
             continue
@@ -229,6 +240,12 @@ def process_batch(input_folder, output_folder_name, condition_label):
         print(f"Processing: {base_name}...")
         try:
             img = skimage.io.imread(img_path)
+            
+            # --- FIX FOR SLOWNESS/WARNINGS ---
+            # Normalize to 0.0-1.0 range immediately
+            img = normalize_image_for_plot(img)
+            # ---------------------------------
+            
             seg_data = np.load(mask_path, allow_pickle=True).item()
             masks = seg_data["masks"] 
         except Exception as e:
@@ -258,67 +275,46 @@ def process_batch(input_folder, output_folder_name, condition_label):
         print(f"No valid data found for {condition_label}")
         return pd.DataFrame()
 
-def plot_comparison(droplet_df, bulk_df, output_dir):
-    """
-    Generate comparison plots between Droplet and Bulk.
-    Updated to resolve Seaborn FutureWarning.
-    """
+def plot_comparison(df1, df2, output_dir):
     print("\n--- Generating Comparison Graphs ---")
     os.makedirs(output_dir, exist_ok=True)
     
-    if droplet_df.empty or bulk_df.empty:
+    if df1.empty or df2.empty:
         print("Cannot compare: One or both datasets are empty.")
         return
 
-    combined_df = pd.concat([droplet_df, bulk_df], ignore_index=True)
+    combined_df = pd.concat([df1, df2], ignore_index=True)
     combined_df.to_csv(os.path.join(output_dir, "combined_comparison_data.csv"), index=False)
+    
+    unique_conditions = combined_df["Condition"].unique()
+    if len(unique_conditions) >= 2:
+        cond_1 = unique_conditions[0]
+        cond_2 = unique_conditions[1]
+        title_str = f"{cond_1} vs. {cond_2}"
+        filename_str = f"comparison_{cond_1}_vs_{cond_2}.png"
+    else:
+        title_str = "Comparison"
+        filename_str = "comparison_plot.png"
 
     fig, axes = plt.subplots(1, 3, figsize=(20, 6))
     
-    # 1. Average Axis Comparison
-    sns.boxplot(
-        data=combined_df, 
-        x="Condition", 
-        y="average_axis", 
-        hue="Condition", # Added hue
-        legend=False,    # Disabled legend
-        ax=axes[0], 
-        palette="Set2"
-    )
+    sns.boxplot(data=combined_df, x="Condition", y="average_axis", hue="Condition", legend=False, ax=axes[0], palette="Set2")
     axes[0].set_title(f"Average Axis Length ({UNIT_NAME})")
     axes[0].set_ylabel(f"Length ({UNIT_NAME})")
 
-    # 2. Area Comparison
-    sns.boxplot(
-        data=combined_df, 
-        x="Condition", 
-        y="area", 
-        hue="Condition", # Added hue
-        legend=False,    # Disabled legend
-        ax=axes[1], 
-        palette="Set2"
-    )
+    sns.boxplot(data=combined_df, x="Condition", y="area", hue="Condition", legend=False, ax=axes[1], palette="Set2")
     axes[1].set_title(f"Organoid Area ({UNIT_NAME}²)")
     axes[1].set_ylabel(f"Area ({UNIT_NAME}²)")
     
-    # 3. Circularity Comparison
-    sns.boxplot(
-        data=combined_df, 
-        x="Condition", 
-        y="circularity", 
-        hue="Condition", # Added hue
-        legend=False,    # Disabled legend
-        ax=axes[2], 
-        palette="Set2"
-    )
+    sns.boxplot(data=combined_df, x="Condition", y="circularity", hue="Condition", legend=False, ax=axes[2], palette="Set2")
     axes[2].set_title("Circularity (0-1)")
     axes[2].set_ylabel("Circularity Index")
     axes[2].set_ylim(0, 1.05) 
 
-    plt.suptitle("Droplet vs. Bulk Comparison", fontsize=16)
+    plt.suptitle(f"{title_str} Comparison", fontsize=16)
     plt.tight_layout()
     
-    save_path = os.path.join(output_dir, "comparison_droplet_vs_bulk.png")
+    save_path = os.path.join(output_dir, filename_str)
     plt.savefig(save_path)
     print(f"Comparison graph saved to: {save_path}")
     plt.close(fig)
@@ -329,35 +325,28 @@ if __name__ == "__main__":
     print("STEP 0: Sanitize TIFF files (Fix Bad Metadata)")
     print("====================================================")
     
-    fix_tiff_files(DROPLET_FOLDER)
-    fix_tiff_files(BULK_FOLDER)
+    fix_tiff_files(TRAINING_SET_1)
+    fix_tiff_files(TRAINING_SET_2)
+    
+    label_1 = get_condition_name_from_path(TRAINING_SET_1)
+    label_2 = get_condition_name_from_path(TRAINING_SET_2)
+    
+    print(f"\nDetected Conditions:")
+    print(f"  Set 1: {label_1}")
+    print(f"  Set 2: {label_2}")
     
     print("\n====================================================")
     print("STEP 1: Analyze Images")
     print("====================================================")
 
-    droplet_df = process_batch(
-        input_folder=DROPLET_FOLDER, 
-        output_folder_name="droplet_consolidated", 
-        condition_label="Droplet"
-    )
+    df_1 = process_batch(TRAINING_SET_1, f"{label_1.lower()}_consolidated", label_1)
+    df_2 = process_batch(TRAINING_SET_2, f"{label_2.lower()}_consolidated", label_2)
 
-    bulk_df = process_batch(
-        input_folder=BULK_FOLDER, 
-        output_folder_name="bulk_consolidated", 
-        condition_label="Bulk"
-    )
-
-    # 3. Compare
-    full_folder_name = os.path.basename(os.path.normpath(DROPLET_FOLDER))
+    full_folder_name = os.path.basename(os.path.normpath(TRAINING_SET_1))
     match = re.search(r"day-\d+", full_folder_name)
-    
-    if match:
-        day_suffix = match.group()
-    else:
-        day_suffix = full_folder_name
+    day_suffix = match.group() if match else full_folder_name
 
     comparison_folder_name = f"comparison_analysis_{day_suffix}"
     comparison_dir = os.path.join(BASE_OUTPUT_DIR, comparison_folder_name)
     
-    plot_comparison(droplet_df, bulk_df, comparison_dir)
+    plot_comparison(df_1, df_2, comparison_dir)
