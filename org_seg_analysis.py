@@ -105,39 +105,53 @@ def plot_mask_overlay(save_dir, img, masks, filename_prefix, alpha=1.):
     plt.close()
 
 def calculate_organoid_metrics(masks, filename, scale):
-    props = measure.regionprops(masks)
-    metrics = {
-        "source_image": [], "label": [], "area": [], "eccentricity": [],   
-        "circularity": [], "perimeter": [], "major_axis": [], "minor_axis": [], "average_axis": []    
-    }
-
-    for prop in props:
-        if prop.area < 10: continue
-
-        metrics["source_image"].append(filename)
-        metrics["label"].append(prop.label)
+    # 1. Fast extraction of properties
+    # Note: We fetch 'area' (pixels) here, which causes the name collision later
+    props = measure.regionprops_table(masks, properties=(
+        'label', 'area', 'perimeter_crofton', 
+        'major_axis_length', 'minor_axis_length', 'eccentricity'
+    ))
+    
+    df = pd.DataFrame(props)
+    
+    # 2. Filter small objects (vectorized)
+    if df.empty:
+        return pd.DataFrame()
         
-        real_area = prop.area * (scale ** 2)
-        metrics["area"].append(real_area)
+    df = df[df['area'] >= 10].copy()
+    
+    if df.empty:
+        return pd.DataFrame()
 
-        real_perimeter = prop.perimeter_crofton * scale
-        real_major = prop.major_axis_length * scale
-        real_minor = prop.minor_axis_length * scale
-        
-        metrics["perimeter"].append(real_perimeter)
-        metrics["major_axis"].append(real_major)
-        metrics["minor_axis"].append(real_minor)
-        metrics["average_axis"].append((real_major + real_minor) / 2)
-
-        metrics["eccentricity"].append(prop.eccentricity)
-        
-        if real_perimeter > 0:
-            circularity = (4 * np.pi * real_area) / (real_perimeter**2)
-        else:
-            circularity = 0
-        metrics["circularity"].append(min(circularity, 1.0))
-
-    return pd.DataFrame(metrics)
+    # 3. Vectorized calculations
+    df["source_image"] = filename
+    
+    # Calculate physical units
+    df["area_micron"] = df["area"] * (scale ** 2)
+    df["perimeter_micron"] = df["perimeter_crofton"] * scale
+    df["major_axis"] = df["major_axis_length"] * scale
+    df["minor_axis"] = df["minor_axis_length"] * scale
+    df["average_axis"] = (df["major_axis"] + df["minor_axis"]) / 2
+    
+    # Circularity
+    df["circularity"] = (4 * np.pi * df["area_micron"]) / (df["perimeter_micron"] ** 2)
+    df["circularity"] = df["circularity"].clip(upper=1.0).fillna(0)
+    
+    # 4. FIX: Drop original pixel columns to avoid duplicates before renaming
+    # We drop 'area' (pixels) so we can rename 'area_micron' to 'area' safely
+    df = df.drop(columns=['area', 'perimeter_crofton', 'major_axis_length', 'minor_axis_length'])
+    
+    # 5. Rename columns
+    df = df.rename(columns={
+        "area_micron": "area", 
+        "perimeter_micron": "perimeter"
+    })
+    
+    # 6. Return specific ordered columns
+    return df[[
+        "source_image", "label", "area", "eccentricity", 
+        "circularity", "perimeter", "major_axis", "minor_axis", "average_axis"
+    ]]
 
 def plot_metric_statistics(save_dir, metrics_df, title_suffix):
     fig, axes = plt.subplots(2, 3, figsize=(18, 10))
@@ -169,31 +183,61 @@ def plot_metric_statistics(save_dir, metrics_df, title_suffix):
     plt.close(fig)
 
 def plot_metric_heatmap_on_image(save_dir, img, masks, metrics_df, metric, filename_prefix, alpha=0.6):
+    # 1. Setup Color Map
     norm = Normalize(vmin=metrics_df[metric].min(), vmax=metrics_df[metric].max())
     cmap = viridis
     
-    overlay = np.zeros((*masks.shape, 4), dtype=float)
-    label_to_metric = dict(zip(metrics_df["label"], metrics_df[metric]))
+    # 2. VECTORIZATION TRICK: Create a lookup array
+    # We create an array where index == label_id, and value == metric_value
+    max_label = masks.max()
+    # Initialize with NaN or 0
+    metric_map_lookup = np.zeros(max_label + 1)
+    
+    # Fill the lookup table (fast pandas mapping)
+    # We map the specific metric values to their corresponding label indices
+    indices = metrics_df["label"].values
+    values = metrics_df[metric].values
+    
+    # Filter indices to ensure they fall within the mask range
+    valid_mask = indices <= max_label
+    metric_map_lookup[indices[valid_mask]] = values[valid_mask]
 
-    for label_val, metric_val in label_to_metric.items():
-        color = cmap(norm(metric_val)) 
-        mask = masks == label_val
-        overlay[mask, :3] = color[:3]
-        overlay[mask, 3] = alpha 
+    # 3. Apply lookup to the mask image instantly
+    # This creates an image where pixel values are the metric values (e.g., Area)
+    mapped_image = metric_map_lookup[masks]
 
-    # Image is already normalized in process_batch to 0-1
+    # 4. Colorize
+    # Apply colormap to the metric values
+    overlay_rgba = cmap(norm(mapped_image))
+    
+    # 5. Handle Background
+    # Identify where the mask is 0 (background) and make it transparent
+    background_mask = (masks == 0)
+    overlay_rgba[background_mask, 3] = 0.0  # Set alpha to 0 for background
+    overlay_rgba[~background_mask, 3] = alpha # Set alpha for objects
+
+    # 6. Blend with original image
+    # Ensure img is normalized RGB
     if img.ndim == 2:
         background = np.stack([img] * 3, axis=-1)
     else:
         background = img.copy()
 
+    # Fast blending using Matplotlib overlay is cleaner, but manual is fine too:
     combined = background.copy()
-    alpha_mask = overlay[..., 3]
-    for c in range(3):
-        combined[..., c] = (overlay[..., c] * alpha_mask) + (
-            background[..., c] * (1 - alpha_mask)
-        )
+    
+    # Only update pixels that are not background
+    mask_indices = ~background_mask
+    
+    # Blend: (Overlay * Alpha) + (Background * (1 - Alpha))
+    # We perform this calculation only on the organoid pixels
+    fg = overlay_rgba[mask_indices, :3]
+    bg = background[mask_indices, :3]
+    a = overlay_rgba[mask_indices, 3][:, None] # shape adjustment for broadcasting
+    
+    combined[mask_indices] = (fg * a) + (bg * (1.0 - a))
 
+    # 7. Plotting
     fig, ax = plt.subplots(figsize=(8, 8))
     ax.imshow(combined)
     ax.axis("off")
@@ -254,6 +298,12 @@ def process_batch(input_folder, output_folder_name, condition_label):
 
         plot_mask_overlay(individual_dir, img, masks, filename_prefix=base_name)
         current_df = calculate_organoid_metrics(masks, base_name, MICRONS_PER_PIXEL)
+        
+        # SAFEGUARD: Skip plotting if no organoids found
+        if current_df.empty:
+            print(f"Skipping plots for {base_name} (no valid organoids).")
+            continue
+        
         current_df["Condition"] = condition_label
         batch_metrics_list.append(current_df)
 
