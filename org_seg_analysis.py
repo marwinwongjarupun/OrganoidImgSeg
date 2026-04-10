@@ -12,11 +12,12 @@ import os
 import glob
 import tifffile
 from pathlib import Path
+from scipy import stats  # Added for statistical analysis
 
 # ================= CONFIGURATION =================
 # 1. PATHS FOR THE TWO DATASETS
-TRAINING_SET_1 = r"C:\Users\Marwin\Desktop\organoids\20251215\training-day-5-shaker"
-TRAINING_SET_2 = r"C:\Users\Marwin\Desktop\organoids\20251215\training-day-5-coated" 
+TRAINING_SET_1 = r"D:\Organoid images\confocal\260330\training\training-collection"
+TRAINING_SET_2 = r"D:\Organoid images\confocal\260330\training\training-waste" 
 
 # 2. OUTPUT LOCATION
 BASE_OUTPUT_DIR = os.path.dirname(TRAINING_SET_1)
@@ -92,7 +93,6 @@ def normalize_image_for_plot(img):
     return img
 
 def plot_mask_overlay(save_dir, img, masks, filename_prefix, alpha=1.):
-    # img is assumed to be already normalized by process_batch
     mask_overlay = label2rgb(
         masks, image=img, bg_label=0, bg_color=None, alpha=alpha, kind="overlay"
     )
@@ -105,8 +105,6 @@ def plot_mask_overlay(save_dir, img, masks, filename_prefix, alpha=1.):
     plt.close()
 
 def calculate_organoid_metrics(masks, filename, scale):
-    # 1. Fast extraction of properties
-    # Note: We fetch 'area' (pixels) here, which causes the name collision later
     props = measure.regionprops_table(masks, properties=(
         'label', 'area', 'perimeter_crofton', 
         'major_axis_length', 'minor_axis_length', 'eccentricity'
@@ -114,7 +112,6 @@ def calculate_organoid_metrics(masks, filename, scale):
     
     df = pd.DataFrame(props)
     
-    # 2. Filter small objects (vectorized)
     if df.empty:
         return pd.DataFrame()
         
@@ -123,31 +120,24 @@ def calculate_organoid_metrics(masks, filename, scale):
     if df.empty:
         return pd.DataFrame()
 
-    # 3. Vectorized calculations
     df["source_image"] = filename
     
-    # Calculate physical units
     df["area_micron"] = df["area"] * (scale ** 2)
     df["perimeter_micron"] = df["perimeter_crofton"] * scale
     df["major_axis"] = df["major_axis_length"] * scale
     df["minor_axis"] = df["minor_axis_length"] * scale
     df["average_axis"] = (df["major_axis"] + df["minor_axis"]) / 2
     
-    # Circularity
     df["circularity"] = (4 * np.pi * df["area_micron"]) / (df["perimeter_micron"] ** 2)
     df["circularity"] = df["circularity"].clip(upper=1.0).fillna(0)
     
-    # 4. FIX: Drop original pixel columns to avoid duplicates before renaming
-    # We drop 'area' (pixels) so we can rename 'area_micron' to 'area' safely
     df = df.drop(columns=['area', 'perimeter_crofton', 'major_axis_length', 'minor_axis_length'])
     
-    # 5. Rename columns
     df = df.rename(columns={
         "area_micron": "area", 
         "perimeter_micron": "perimeter"
     })
     
-    # 6. Return specific ordered columns
     return df[[
         "source_image", "label", "area", "eccentricity", 
         "circularity", "perimeter", "major_axis", "minor_axis", "average_axis"
@@ -183,61 +173,38 @@ def plot_metric_statistics(save_dir, metrics_df, title_suffix):
     plt.close(fig)
 
 def plot_metric_heatmap_on_image(save_dir, img, masks, metrics_df, metric, filename_prefix, alpha=0.6):
-    # 1. Setup Color Map
     norm = Normalize(vmin=metrics_df[metric].min(), vmax=metrics_df[metric].max())
     cmap = viridis
     
-    # 2. VECTORIZATION TRICK: Create a lookup array
-    # We create an array where index == label_id, and value == metric_value
     max_label = masks.max()
-    # Initialize with NaN or 0
     metric_map_lookup = np.zeros(max_label + 1)
     
-    # Fill the lookup table (fast pandas mapping)
-    # We map the specific metric values to their corresponding label indices
     indices = metrics_df["label"].values
     values = metrics_df[metric].values
-    
-    # Filter indices to ensure they fall within the mask range
     valid_mask = indices <= max_label
     metric_map_lookup[indices[valid_mask]] = values[valid_mask]
 
-    # 3. Apply lookup to the mask image instantly
-    # This creates an image where pixel values are the metric values (e.g., Area)
     mapped_image = metric_map_lookup[masks]
-
-    # 4. Colorize
-    # Apply colormap to the metric values
     overlay_rgba = cmap(norm(mapped_image))
     
-    # 5. Handle Background
-    # Identify where the mask is 0 (background) and make it transparent
     background_mask = (masks == 0)
-    overlay_rgba[background_mask, 3] = 0.0  # Set alpha to 0 for background
-    overlay_rgba[~background_mask, 3] = alpha # Set alpha for objects
+    overlay_rgba[background_mask, 3] = 0.0  
+    overlay_rgba[~background_mask, 3] = alpha 
 
-    # 6. Blend with original image
-    # Ensure img is normalized RGB
     if img.ndim == 2:
         background = np.stack([img] * 3, axis=-1)
     else:
         background = img.copy()
 
-    # Fast blending using Matplotlib overlay is cleaner, but manual is fine too:
     combined = background.copy()
-    
-    # Only update pixels that are not background
     mask_indices = ~background_mask
     
-    # Blend: (Overlay * Alpha) + (Background * (1 - Alpha))
-    # We perform this calculation only on the organoid pixels
     fg = overlay_rgba[mask_indices, :3]
     bg = background[mask_indices, :3]
-    a = overlay_rgba[mask_indices, 3][:, None] # shape adjustment for broadcasting
+    a = overlay_rgba[mask_indices, 3][:, None] 
     
     combined[mask_indices] = (fg * a) + (bg * (1.0 - a))
 
-    # 7. Plotting
     fig, ax = plt.subplots(figsize=(8, 8))
     ax.imshow(combined)
     ax.axis("off")
@@ -258,9 +225,8 @@ def process_batch(input_folder, output_folder_name, condition_label):
     os.makedirs(save_dir, exist_ok=True)
     os.makedirs(individual_dir, exist_ok=True)
 
-    batch_metrics_list = []
+    batch_metrics_list =[]
     
-    # Updated: Look for both .tif and .tiff
     image_files = glob.glob(os.path.join(input_folder, "*.tif")) + \
                   glob.glob(os.path.join(input_folder, "*.tiff"))
     
@@ -268,7 +234,6 @@ def process_batch(input_folder, output_folder_name, condition_label):
     print(f"Found {len(image_files)} files.")
 
     for img_path in image_files:
-        # Get extension dynamically to replace it correctly
         _, ext = os.path.splitext(img_path)
         base_name = os.path.basename(img_path).replace(ext, "")
         
@@ -284,11 +249,7 @@ def process_batch(input_folder, output_folder_name, condition_label):
         print(f"Processing: {base_name}...")
         try:
             img = skimage.io.imread(img_path)
-            
-            # --- FIX FOR SLOWNESS/WARNINGS ---
-            # Normalize to 0.0-1.0 range immediately
             img = normalize_image_for_plot(img)
-            # ---------------------------------
             
             seg_data = np.load(mask_path, allow_pickle=True).item()
             masks = seg_data["masks"] 
@@ -299,7 +260,6 @@ def process_batch(input_folder, output_folder_name, condition_label):
         plot_mask_overlay(individual_dir, img, masks, filename_prefix=base_name)
         current_df = calculate_organoid_metrics(masks, base_name, MICRONS_PER_PIXEL)
         
-        # SAFEGUARD: Skip plotting if no organoids found
         if current_df.empty:
             print(f"Skipping plots for {base_name} (no valid organoids).")
             continue
@@ -325,6 +285,48 @@ def process_batch(input_folder, output_folder_name, condition_label):
         print(f"No valid data found for {condition_label}")
         return pd.DataFrame()
 
+def add_stat_annotation(ax, data1, data2, metric):
+    """
+    Calculates Mann-Whitney U p-value between two datasets and adds
+    a significance bracket with asterisks and the p-value to the plot.
+    """
+    val1 = data1[metric].dropna()
+    val2 = data2[metric].dropna()
+    
+    if len(val1) == 0 or len(val2) == 0:
+        return
+        
+    # Non-parametric independent test (appropriate for image properties)
+    stat, p = stats.mannwhitneyu(val1, val2, alternative='two-sided')
+    
+    # Significance logic
+    if p > 0.05: sig = "ns"
+    elif p <= 0.0001: sig = "****"
+    elif p <= 0.001: sig = "***"
+    elif p <= 0.01: sig = "**"
+    else: sig = "*"
+        
+    # Get y-axis limits to position the bracket correctly
+    ymin, ymax = ax.get_ylim()
+    yrange = ymax - ymin
+    
+    # Position mappings
+    y_bracket = ymax + yrange * 0.02
+    y_text = y_bracket + yrange * 0.01
+    
+    # Draw bracket (Assuming boxplots are at x=0 and x=1)
+    x1, x2 = 0, 1 
+    ax.plot([x1, x1, x2, x2],[y_bracket - yrange*0.02, y_bracket, y_bracket, y_bracket - yrange*0.02], 
+            lw=1.5, c='black')
+    
+    # Add text
+    p_text = f"p={p:.2e}" if p < 0.001 else f"p={p:.3f}"
+    ax.text((x1 + x2) * 0.5, y_text, f"{sig}\n({p_text})", 
+            ha='center', va='bottom', color='black', fontsize=10)
+    
+    # Adjust y-limits to make room for the annotation
+    ax.set_ylim(ymin, y_text + yrange * 0.18)
+
 def plot_comparison(df1, df2, output_dir):
     print("\n--- Generating Comparison Graphs ---")
     os.makedirs(output_dir, exist_ok=True)
@@ -334,32 +336,44 @@ def plot_comparison(df1, df2, output_dir):
         return
 
     combined_df = pd.concat([df1, df2], ignore_index=True)
-    combined_df.to_csv(os.path.join(output_dir, "combined_comparison_data.csv"), index=False)
     
-    unique_conditions = combined_df["Condition"].unique()
-    if len(unique_conditions) >= 2:
-        cond_1 = unique_conditions[0]
-        cond_2 = unique_conditions[1]
-        title_str = f"{cond_1} vs. {cond_2}"
-        filename_str = f"comparison_{cond_1}_vs_{cond_2}.png"
-    else:
-        title_str = "Comparison"
-        filename_str = "comparison_plot.png"
+    # Get exact conditions for ordering 
+    cond_1 = df1["Condition"].iloc[0]
+    cond_2 = df2["Condition"].iloc[0]
+    
+    title_str = f"{cond_1} vs. {cond_2}"
+    filename_str = f"comparison_{cond_1}_vs_{cond_2}.png"
+    csv_name = f"combined_comparison_data_{cond_1}_vs_{cond_2}.csv"
 
-    fig, axes = plt.subplots(1, 3, figsize=(20, 6))
+    combined_df.to_csv(os.path.join(output_dir, csv_name), index=False)
+
+    # Increased figure height slightly to leave room for the statistical annotations
+    fig, axes = plt.subplots(1, 3, figsize=(20, 7))
     
-    sns.boxplot(data=combined_df, x="Condition", y="average_axis", hue="Condition", legend=False, ax=axes[0], palette="Set2")
+    # Setting an explicit order guarantees cond_1 is at x=0 and cond_2 is at x=1
+    plot_order = [cond_1, cond_2]
+    
+    # Plot 1: Average Axis
+    sns.boxplot(data=combined_df, x="Condition", y="average_axis", hue="Condition", 
+                legend=False, ax=axes[0], palette="Set2", order=plot_order)
     axes[0].set_title(f"Average Axis Length ({UNIT_NAME})")
     axes[0].set_ylabel(f"Length ({UNIT_NAME})")
+    add_stat_annotation(axes[0], df1, df2, "average_axis")
 
-    sns.boxplot(data=combined_df, x="Condition", y="area", hue="Condition", legend=False, ax=axes[1], palette="Set2")
+    # Plot 2: Area
+    sns.boxplot(data=combined_df, x="Condition", y="area", hue="Condition", 
+                legend=False, ax=axes[1], palette="Set2", order=plot_order)
     axes[1].set_title(f"Organoid Area ({UNIT_NAME}²)")
     axes[1].set_ylabel(f"Area ({UNIT_NAME}²)")
+    add_stat_annotation(axes[1], df1, df2, "area")
     
-    sns.boxplot(data=combined_df, x="Condition", y="circularity", hue="Condition", legend=False, ax=axes[2], palette="Set2")
+    # Plot 3: Circularity
+    sns.boxplot(data=combined_df, x="Condition", y="circularity", hue="Condition", 
+                legend=False, ax=axes[2], palette="Set2", order=plot_order)
     axes[2].set_title("Circularity (0-1)")
     axes[2].set_ylabel("Circularity Index")
-    axes[2].set_ylim(0, 1.05) 
+    axes[2].set_ylim(0, 1.05) # Initialize bounds first before calculating text placement
+    add_stat_annotation(axes[2], df1, df2, "circularity")
 
     plt.suptitle(f"{title_str} Comparison", fontsize=16)
     plt.tight_layout()

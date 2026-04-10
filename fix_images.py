@@ -5,8 +5,8 @@ from pathlib import Path
 
 # --- UPDATE THESE PATHS ---
 paths_to_fix = [
-    r"C:\Users\Marwin\Desktop\organoids\251204\training-day-5-bulk",
-    r"C:\Users\Marwin\Desktop\organoids\251204\training-day-5"
+    r"D:\Organoid images\confocal\260330\training\training-collection",
+    r"D:\Organoid images\confocal\260330\training\training-waste"
 ]
 
 def fix_tiff_files(directory):
